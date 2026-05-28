@@ -21,18 +21,23 @@ def create_app():
 
     _register_jwt_callbacks(jwt)
 
-    # ← Tambahkan ini
     with app.app_context():
-        from app.models import User, AlertConfig, NotificationConfig, WaRecipient, MlPrediction
+        from app.models import (
+            User, AlertConfig, NotificationConfig, WaRecipient,
+            MlPrediction, EvacuationPoint, EmergencyContact, FloodEvent,
+        )
 
     from app.api.auth import auth_bp
     from app.api.alert import alert_bp
-    from app.api.bmkg import bmkg_bp   
+    from app.api.bmkg import bmkg_bp
+    from app.api.public import public_bp       # ← endpoint publik Flutter
+    from app.api.panduan import panduan_bp     # ← manajemen evakuasi & kontak (admin)
 
-    app.register_blueprint(auth_bp, url_prefix="/api/auth")
-    app.register_blueprint(alert_bp, url_prefix="/api/alert")
-    app.register_blueprint(bmkg_bp, url_prefix="/api/bmkg")   # ← Tambahkan ini
-   
+    app.register_blueprint(auth_bp,   url_prefix="/api/auth")
+    app.register_blueprint(alert_bp,  url_prefix="/api/alert")
+    app.register_blueprint(bmkg_bp,   url_prefix="/api/bmkg")
+    app.register_blueprint(public_bp, url_prefix="/api/public")   # ← publik
+    app.register_blueprint(panduan_bp, url_prefix="/api/panduan") # ← admin
 
     from app.commands import register_commands
     register_commands(app)
