@@ -8,25 +8,37 @@ Rencana upgrade ke model ML (XGBoost) ketika data historis sudah terkumpul.
 Formula:
   flood_probability = bobot_air(40%) + bobot_laju(35%) + bobot_hujan(25%)
   + bonus faktor pendukung (angin laut, kelembaban tinggi, jam pasang)
+
+Catatan prototype (skema 50cm):
+  - Sensor dipasang 50cm dari dasar wadah
+  - Range air efektif: 0-25cm
+  - Threshold disesuaikan ke skala prototype
 """
 
 from datetime import datetime, timezone
 
 
-# ── Threshold default (cm) ────────────────────────────────────────────────────
-# Bisa di-override via alert_configs di DB nantinya
+# ── Threshold ketinggian air (cm) — skala prototype ──────────────────────────
 THRESHOLD_WATER = {
-    "INFO"     : 20.0,   # air mulai naik
-    "WASPADA"  : 35.0,   # waspada rob
-    "SIAGA"    : 55.0,   # siaga banjir rob
-    "EVAKUASI" : 75.0,   # evakuasi
+    "INFO"     : 5.0,    # air mulai naik dari normal
+    "WASPADA"  : 10.0,   # waspada
+    "SIAGA"    : 20.0,   # siaga
+    "EVAKUASI" : 25.0,   # evakuasi — batas maksimal prototype
 }
 
+# ── Threshold probabilitas ────────────────────────────────────────────────────
 THRESHOLD_PROB = {
     "INFO"     : 0.20,
     "WASPADA"  : 0.40,
     "SIAGA"    : 0.60,
     "EVAKUASI" : 0.80,
+}
+
+# ── Threshold curah hujan (mm) ────────────────────────────────────────────────
+THRESHOLD_RAIN = {
+    "WASPADA"  : 20.0,
+    "SIAGA"    : 40.0,
+    "EVAKUASI" : 60.0,
 }
 
 # Jam pasang surut rob (puncak biasanya pagi & sore)
@@ -35,10 +47,15 @@ JAM_PASANG = [5, 6, 7, 17, 18, 19]
 # Bulan musim hujan/rob Indramayu
 BULAN_RAWAN = [11, 12, 1, 2, 3]
 
+# ── Konstanta normalisasi prototype ──────────────────────────────────────────
+MAX_WATER_LEVEL  = 25.0   # cm — maksimal air prototype
+MAX_WATER_RATE   = 2.0    # cm/menit — laju kenaikan max prototype (lebih realistis)
+MAX_RAINFALL     = 80.0   # mm — curah hujan maksimal normalisasi
+
 
 def _hitung_laju_kenaikan(sensor_reading_id: int) -> float:
     """
-    Hitung laju kenaikan air (cm/menit) dari 6 reading terakhir (~1 menit).
+    Hitung laju kenaikan air (cm/menit) dari 6 reading terakhir.
     Return 0.0 jika data tidak cukup.
     """
     from app.models.sensor import SensorReading
@@ -53,14 +70,11 @@ def _hitung_laju_kenaikan(sensor_reading_id: int) -> float:
     if len(readings) < 2:
         return 0.0
 
-    # reading[0] = terbaru, reading[-1] = terlama
     newest = readings[0]
     oldest = readings[-1]
 
     delta_level = newest.water_level_cm - oldest.water_level_cm
-
-    # Hitung selisih waktu dalam menit
-    delta_time = (
+    delta_time  = (
         newest.recorded_at - oldest.recorded_at
     ).total_seconds() / 60.0
 
@@ -91,7 +105,7 @@ def hitung_flood_probability(
     Hitung probabilitas banjir rob menggunakan rule-based scoring.
 
     Args:
-        water_level_cm   : Ketinggian air saat ini (0–100 cm)
+        water_level_cm   : Ketinggian air saat ini (0–25 cm prototype)
         water_level_rate : Laju kenaikan air (cm/menit), bisa negatif
         rainfall_mm      : Curah hujan prakiraan dari BMKG (mm)
         wind_speed_kmh   : Kecepatan angin (km/h)
@@ -110,17 +124,17 @@ def hitung_flood_probability(
         month = now.month
 
     # ── Komponen 1: Ketinggian air (bobot 40%) ────────────────────────────────
-    # Normalisasi: 0 cm = 0.0, 100 cm = 1.0
-    skor_air = _normalisasi(water_level_cm, 0, 100)
+    # Normalisasi: 0cm = 0.0, 25cm = 1.0 (disesuaikan prototype)
+    skor_air = _normalisasi(water_level_cm, 0, MAX_WATER_LEVEL)
 
     # ── Komponen 2: Laju kenaikan air (bobot 35%) ─────────────────────────────
-    # Normalisasi: 0 cm/menit = 0.0, 10 cm/menit = 1.0
+    # Normalisasi: 0 cm/menit = 0.0, 2 cm/menit = 1.0 (disesuaikan prototype)
     # Laju negatif (air turun) = 0
-    skor_laju = _normalisasi(max(0, water_level_rate), 0, 10)
+    skor_laju = _normalisasi(max(0, water_level_rate), 0, MAX_WATER_RATE)
 
     # ── Komponen 3: Curah hujan BMKG (bobot 25%) ──────────────────────────────
-    # Normalisasi: 0 mm = 0.0, 80 mm = 1.0
-    skor_hujan = _normalisasi(rainfall_mm, 0, 80)
+    # Normalisasi: 0mm = 0.0, 80mm = 1.0
+    skor_hujan = _normalisasi(rainfall_mm, 0, MAX_RAINFALL)
 
     # ── Skor dasar (weighted sum) ─────────────────────────────────────────────
     skor_dasar = (
@@ -133,7 +147,7 @@ def hitung_flood_probability(
     bonus = 0.0
 
     # Angin dari laut (utara / timur laut / barat laut)
-    arah_laut = {"N", "NE", "NW", "N", "UTARA", "TIMUR LAUT", "BARAT LAUT"}
+    arah_laut = {"N", "NE", "NW", "UTARA", "TIMUR LAUT", "BARAT LAUT"}
     if wind_direction.upper().strip() in arah_laut:
         bonus += 0.05
 
@@ -157,7 +171,7 @@ def hitung_flood_probability(
     if month in BULAN_RAWAN:
         bonus += 0.03
 
-    bonus = min(bonus, 0.20)  # cap bonus maksimal 0.20
+    bonus = min(bonus, 0.20)
 
     # ── Probabilitas akhir ────────────────────────────────────────────────────
     flood_probability = round(min(1.0, skor_dasar + bonus), 4)
@@ -196,17 +210,17 @@ def tentukan_alert_level(
     # Cek dari level tertinggi ke terendah
     if (water_level_cm   >= THRESHOLD_WATER["EVAKUASI"] or
             flood_probability >= THRESHOLD_PROB["EVAKUASI"] or
-            rainfall_mm       >= 60):
+            rainfall_mm       >= THRESHOLD_RAIN["EVAKUASI"]):
         return "EVAKUASI"
 
     if (water_level_cm   >= THRESHOLD_WATER["SIAGA"] or
             flood_probability >= THRESHOLD_PROB["SIAGA"] or
-            rainfall_mm       >= 40):
+            rainfall_mm       >= THRESHOLD_RAIN["SIAGA"]):
         return "SIAGA"
 
     if (water_level_cm   >= THRESHOLD_WATER["WASPADA"] or
             flood_probability >= THRESHOLD_PROB["WASPADA"] or
-            rainfall_mm       >= 20):
+            rainfall_mm       >= THRESHOLD_RAIN["WASPADA"]):
         return "WASPADA"
 
     return "INFO"
@@ -257,7 +271,6 @@ def jalankan_prediksi(sensor_reading_id: int) -> dict:
     water_level_rate = _hitung_laju_kenaikan(sensor_reading_id)
 
     # ── 4. Hitung flood probability ───────────────────────────────────────────
-    now = datetime.now(timezone.utc)
     hasil = hitung_flood_probability(
         water_level_cm   = reading.water_level_cm,
         water_level_rate = water_level_rate,
@@ -272,28 +285,25 @@ def jalankan_prediksi(sensor_reading_id: int) -> dict:
     flood_prob = hasil["flood_probability"]
 
     # ── 5. Simpan ml_predictions untuk semua horizon ──────────────────────────
-    # Karena rule-based, probabilitas sama untuk semua horizon
-    # (bisa dikembangkan nanti dengan faktor decay per horizon)
     HORIZONS = [6, 12, 24, 48, 72]
     predictions = []
 
     for horizon in HORIZONS:
         # Faktor decay: makin jauh horizon, makin tidak pasti
-        # 6jam = 100%, 12jam = 95%, 24jam = 88%, 48jam = 78%, 72jam = 70%
         decay = {6: 1.0, 12: 0.95, 24: 0.88, 48: 0.78, 72: 0.70}[horizon]
         prob_horizon = round(flood_prob * decay, 4)
 
         pred = MlPrediction(
-            sensor_reading_id = sensor_reading_id,
-            bmkg_forecast_id  = bmkg_id,
-            horizon_hours     = horizon,
-            predicted_level_cm= reading.water_level_cm,
-            flood_probability = prob_horizon,
+            sensor_reading_id  = sensor_reading_id,
+            bmkg_forecast_id   = bmkg_id,
+            horizon_hours      = horizon,
+            predicted_level_cm = reading.water_level_cm,
+            flood_probability  = prob_horizon,
         )
         db.session.add(pred)
         predictions.append(pred)
 
-    db.session.flush()  # dapat ID tanpa commit dulu
+    db.session.flush()
 
     # ── 6. Hitung & simpan alert_level ───────────────────────────────────────
     alert_level_str = tentukan_alert_level(
@@ -302,30 +312,29 @@ def jalankan_prediksi(sensor_reading_id: int) -> dict:
         rainfall_mm       = rainfall_mm,
     )
 
-    # Ambil prediksi 24 jam untuk referensi alert
     pred_24h = next((p for p in predictions if p.horizon_hours == 24), predictions[0])
 
     alert = AlertLevel(
-        sensor_reading_id    = sensor_reading_id,
-        ml_prediction_id     = pred_24h.id,
-        level                = alert_level_str,
-        water_level_cm       = reading.water_level_cm,
-        flood_probability_24h= pred_24h.flood_probability,
-        rainfall_mm          = rainfall_mm,
-        reason               = f"{alert_level_str}: {hasil['reason']}",
+        sensor_reading_id     = sensor_reading_id,
+        ml_prediction_id      = pred_24h.id,
+        level                 = alert_level_str,
+        water_level_cm        = reading.water_level_cm,
+        flood_probability_24h = pred_24h.flood_probability,
+        rainfall_mm           = rainfall_mm,
+        reason                = f"{alert_level_str}: {hasil['reason']}",
     )
     db.session.add(alert)
     db.session.commit()
 
     return {
-        "sensor_reading_id"  : sensor_reading_id,
-        "water_level_cm"     : reading.water_level_cm,
-        "water_level_rate"   : water_level_rate,
-        "flood_probability"  : flood_prob,
-        "alert_level"        : alert_level_str,
-        "rainfall_mm"        : rainfall_mm,
-        "reason"             : hasil["reason"],
-        "predictions"        : [
+        "sensor_reading_id" : sensor_reading_id,
+        "water_level_cm"    : reading.water_level_cm,
+        "water_level_rate"  : water_level_rate,
+        "flood_probability" : flood_prob,
+        "alert_level"       : alert_level_str,
+        "rainfall_mm"       : rainfall_mm,
+        "reason"            : hasil["reason"],
+        "predictions"       : [
             {
                 "horizon_hours"    : p.horizon_hours,
                 "flood_probability": p.flood_probability,
@@ -333,6 +342,6 @@ def jalankan_prediksi(sensor_reading_id: int) -> dict:
             }
             for p in predictions
         ],
-        "alert_level_id"     : alert.id,
-        "bmkg_tersedia"      : bmkg is not None,
+        "alert_level_id"    : alert.id,
+        "bmkg_tersedia"     : bmkg is not None,
     }

@@ -26,7 +26,6 @@ class ChangePasswordSchema(Schema):
     )
 
 
-# ← Tidak ada indent di sini, sejajar dengan class di atas
 class SensorReadingSchema(Schema):
     water_level_cm = fields.Float(required=True)
     temperature_c  = fields.Float(load_default=None, allow_none=True)
@@ -41,6 +40,18 @@ class SensorReadingSchema(Schema):
     def validate_water_level(self, value):
         if value < 0 or value > 500:
             raise MarshmallowError("water_level_cm harus antara 0–500 cm")
+
+    @validates("temperature_c")
+    def validate_temperature(self, value):
+        if value is not None and value == -1:
+            return None
+        return value
+
+    @validates("humidity_pct")
+    def validate_humidity(self, value):
+        if value is not None and value == -1:
+            return None
+        return value
 
 
 login_schema = LoginSchema()
