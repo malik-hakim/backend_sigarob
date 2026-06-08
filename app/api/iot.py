@@ -51,7 +51,7 @@ def riwayat_sensor():
     from app.models.sensor import SensorReading   # ← lazy import
 
     page     = request.args.get("page", 1, type=int)
-    per_page = min(request.args.get("per_page", 20, type=int), 100)
+    per_page = min(request.args.get("per_page", 20, type=int), 200)
 
     pagination = (
         SensorReading.query
